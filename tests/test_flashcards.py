@@ -89,3 +89,51 @@ async def test_invalid_json_is_failure():
         result = await creator.generate(req)
         assert result.status == "FAILURE"
         assert result.errors[0].phase == "parse"
+
+
+@pytest.mark.asyncio
+async def test_strips_markdown_fences():
+    creator = FlashcardCreator()
+    fenced = "```json\n" + json.dumps(
+        {"deck_name": "D", "cards": [{"front": "Q", "back": "A"}]}
+    ) + "\n```"
+    with tempfile.TemporaryDirectory() as td:
+        req = CreationRequest(
+            content=ContentBundle(text="x"),
+            config={"deck_name": "D"},
+            models={"text": _FakeRole(provider="f", model="f", payload=fenced)},
+            output_dir=td,
+            artifact_id="a",
+        )
+        result = await creator.generate(req)
+        assert result.status == "SUCCESS"
+        assert len(result.data["cards"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_skips_incomplete_cards():
+    creator = FlashcardCreator()
+    with tempfile.TemporaryDirectory() as td:
+        req = CreationRequest(
+            content=ContentBundle(text="x"),
+            models={"text": _role([
+                {"front": "Q", "back": "A"},
+                {"front": "", "back": "B"},
+                {"front": "C", "back": ""},
+            ])},
+            output_dir=td,
+            artifact_id="a",
+        )
+        result = await creator.generate(req)
+        assert result.status == "SUCCESS"
+        assert len(result.data["cards"]) == 1  # incomplete cards dropped
+
+
+@pytest.mark.asyncio
+async def test_no_text_role_is_failure():
+    creator = FlashcardCreator()
+    with tempfile.TemporaryDirectory() as td:
+        req = CreationRequest(content=ContentBundle(text="x"), output_dir=td, artifact_id="a")
+        result = await creator.generate(req)
+        assert result.status == "FAILURE"
+        assert result.errors[0].phase == "setup"
