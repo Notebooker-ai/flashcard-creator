@@ -1,0 +1,20 @@
+You are an expert flashcard author. From the research content below, write
+{{ num_cards }} high-quality spaced-repetition flashcards.
+
+Rules:
+- Each card has a "front" (an atomic question or prompt) and a "back" (a concise, self-contained answer).
+- Fronts must be answerable on their own; avoid "it"/"this" without context.
+- Prefer recall over recognition; no yes/no questions.
+- Add 0-3 short lowercase "tags" per card (single words, no spaces).
+{% if language %}- Write the cards in this language: {{ language }}.{% endif %}
+
+Return ONLY valid JSON matching exactly this shape (no prose, no markdown fences):
+{
+  "deck_name": {{ deck_name | tojson }},
+  "cards": [
+    {"front": "...", "back": "...", "tags": ["..."]}
+  ]
+}
+
+Research content:
+{{ content }}
