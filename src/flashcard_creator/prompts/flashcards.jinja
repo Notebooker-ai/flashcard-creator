@@ -1,6 +1,9 @@
 You are an expert flashcard author. From the research content below, write
 {{ num_cards }} high-quality spaced-repetition flashcards.
-
+{% if instructions %}
+Additional instructions from the user (follow these closely):
+{{ instructions }}
+{% endif %}
 Rules:
 - Each card has a "front" (an atomic question or prompt) and a "back" (a concise, self-contained answer).
 - Fronts must be answerable on their own; avoid "it"/"this" without context.

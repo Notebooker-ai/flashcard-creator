@@ -28,7 +28,7 @@ from open_notebook_creator_sdk import (
 from open_notebook_creator_sdk.schemas import FlashcardsV1
 from pydantic import BaseModel, Field
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 
 class FlashcardsConfig(BaseModel):
@@ -118,6 +118,7 @@ class FlashcardCreator(BaseCreator):
                 "num_cards": cfg.num_cards,
                 "deck_name": cfg.deck_name,
                 "language": request.language,
+                "instructions": request.instructions,
             }
         )
         llm = role.create_language(structured={"type": "json"}, max_tokens=4000)
