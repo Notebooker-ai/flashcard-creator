@@ -23,12 +23,13 @@ from open_notebook_creator_sdk import (
     CreationRequest,
     CreationResult,
     CreatorManifest,
+    CreatorView,
     ModelRoleSpec,
 )
 from open_notebook_creator_sdk.schemas import FlashcardsV1
 from pydantic import BaseModel, Field
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 
 
 class FlashcardsConfig(BaseModel):
@@ -83,7 +84,7 @@ class FlashcardCreator(BaseCreator):
             name="Flashcards",
             version=__version__,
             description="LLM-generated Q/A cards for in-app study and Anki export.",
-            sdk_compat=">=0.1,<1",
+            sdk_compat=">=0.4,<1",
             emits=["flashcards.v1"],
             model_roles=[
                 ModelRoleSpec(
@@ -94,6 +95,7 @@ class FlashcardCreator(BaseCreator):
                 )
             ],
             icon="layers",
+            view=CreatorView(entry="view/index.html"),
         )
 
     async def generate(self, request: CreationRequest) -> CreationResult:

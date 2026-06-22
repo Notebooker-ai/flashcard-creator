@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Flashcards</title>
+<!--
+  flashcard-creator view bundle. Self-contained (no external deps) so it runs in
+  the host's sandboxed, opaque-origin iframe. The host posts the artifact in via
+  postMessage; this view dispatches on schema_id and renders. Display-only — study
+  state is in-memory and resets each load (no write-back to the host API).
+
+  Versioning lives here: keep a renderer for every schema_id this creator has ever
+  emitted. Today that is just flashcards.v1.
+-->
+<style>
+  :root {
+    --bg: #ffffff; --fg: #18181b; --muted: #71717a; --card: #fafafa;
+    --border: #e4e4e7; --accent: #4f46e5; --accent-fg: #ffffff;
+    --good: #16a34a; --bad: #dc2626;
+  }
+  :root[data-theme="dark"] {
+    --bg: #18181b; --fg: #fafafa; --muted: #a1a1aa; --card: #27272a;
+    --border: #3f3f46; --accent: #6366f1; --accent-fg: #ffffff;
+    --good: #22c55e; --bad: #ef4444;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; background: var(--bg); color: var(--fg);
+    font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  }
+  .bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+  .count { color: var(--muted); font-size: 13px; }
+  button {
+    font: inherit; cursor: pointer; border: 1px solid var(--border);
+    background: var(--card); color: var(--fg); border-radius: 8px;
+    padding: 6px 12px; transition: filter .12s ease;
+  }
+  button:hover { filter: brightness(0.97); }
+  button.primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  ul.list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  ul.list li { padding: 12px 14px; border-top: 1px solid var(--border); }
+  ul.list li:first-child { border-top: none; }
+  .front { font-weight: 600; }
+  .back { color: var(--muted); margin-top: 2px; }
+  .study {
+    border: 1px solid var(--border); border-radius: 14px; padding: 28px 24px;
+    min-height: 220px; display: flex; flex-direction: column; justify-content: center;
+    gap: 18px; text-align: center; background: var(--card);
+  }
+  .q { font-size: 18px; font-weight: 600; }
+  .a { font-size: 15px; color: var(--fg); border-top: 1px solid var(--border); padding-top: 16px; }
+  .tags { margin-top: 10px; display: flex; gap: 6px; justify-content: center; flex-wrap: wrap; }
+  .tag { font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; }
+  .progress { color: var(--muted); font-size: 12px; }
+  .done { text-align: center; color: var(--muted); padding: 40px 0; }
+  .empty { color: var(--muted); padding: 24px; text-align: center; }
+</style>
+</head>
+<body>
+<div id="root"><div class="empty">Loading…</div></div>
+<script>
+(function () {
+  "use strict";
+  var root = document.getElementById("root");
+  var esc = function (s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  };
+
+  // ---- per-schema renderers (keep old versions forever) --------------------
+  var renderers = {
+    "flashcards.v1": renderFlashcardsV1,
+  };
+
+  function renderFlashcardsV1(data) {
+    var deck = (data && data.deck_name) || "Flashcards";
+    var cards = (data && Array.isArray(data.cards)) ? data.cards : [];
+    if (!cards.length) {
+      root.innerHTML = '<div class="empty">This deck has no cards.</div>';
+      return;
+    }
+
+    var studying = false, idx = 0, revealed = false;
+
+    function shuffle() {
+      for (var i = cards.length - 1; i > 0; i--) {
+        var j = Math.floor(Math.random() * (i + 1));
+        var t = cards[i]; cards[i] = cards[j]; cards[j] = t;
+      }
+    }
+
+    function listView() {
+      var items = cards.map(function (c) {
+        return '<li><div class="front">' + esc(c.front) + '</div>' +
+               '<div class="back">' + esc(c.back) + '</div></li>';
+      }).join("");
+      root.innerHTML =
+        '<div class="bar">' +
+          '<div class="count">' + cards.length + ' card' + (cards.length === 1 ? '' : 's') + '</div>' +
+          '<div class="row">' +
+            '<button class="primary" id="study">Study</button>' +
+          '</div>' +
+        '</div>' +
+        '<ul class="list">' + items + '</ul>';
+      document.getElementById("study").onclick = function () {
+        studying = true; idx = 0; revealed = false; shuffle(); studyView();
+      };
+    }
+
+    function studyView() {
+      if (idx >= cards.length) {
+        root.innerHTML =
+          '<div class="bar"><div class="count">' + esc(deck) + '</div>' +
+          '<div class="row"><button id="exit">Back to list</button></div></div>' +
+          '<div class="study"><div class="done">All done — ' + cards.length +
+          ' cards reviewed.</div><div class="row" style="justify-content:center">' +
+          '<button class="primary" id="again">Study again</button></div></div>';
+        document.getElementById("exit").onclick = function () { studying = false; listView(); };
+        document.getElementById("again").onclick = function () { idx = 0; revealed = false; shuffle(); studyView(); };
+        return;
+      }
+      var c = cards[idx];
+      var tags = (c.tags && c.tags.length)
+        ? '<div class="tags">' + c.tags.map(function (t) { return '<span class="tag">' + esc(t) + '</span>'; }).join("") + '</div>'
+        : '';
+      root.innerHTML =
+        '<div class="bar">' +
+          '<div class="count">' + esc(deck) + '</div>' +
+          '<div class="row"><button id="exit">Back to list</button></div>' +
+        '</div>' +
+        '<div class="study">' +
+          '<div class="q">' + esc(c.front) + '</div>' +
+          (revealed ? ('<div class="a">' + esc(c.back) + '</div>' + tags) : '') +
+          '<div class="row" style="justify-content:center">' +
+            (revealed
+              ? '<button id="next" class="primary">Next card</button>'
+              : '<button id="reveal" class="primary">Reveal answer</button>') +
+          '</div>' +
+          '<div class="progress">' + (idx + 1) + ' / ' + cards.length + '</div>' +
+        '</div>';
+      document.getElementById("exit").onclick = function () { studying = false; listView(); };
+      if (revealed) {
+        document.getElementById("next").onclick = function () { idx++; revealed = false; studyView(); };
+      } else {
+        document.getElementById("reveal").onclick = function () { revealed = true; studyView(); };
+      }
+    }
+
+    listView();
+  }
+
+  // ---- host handshake ------------------------------------------------------
+  function applyTheme(theme) {
+    document.documentElement.setAttribute("data-theme", theme === "dark" ? "dark" : "light");
+  }
+
+  function onArtifact(msg) {
+    applyTheme(msg.theme);
+    var r = renderers[msg.schema_id];
+    if (!r) {
+      root.innerHTML = '<div class="empty">No renderer for "' + esc(msg.schema_id) + '".</div>';
+      return;
+    }
+    try { r(msg.data || {}); }
+    catch (e) { root.innerHTML = '<div class="empty">Failed to render this artifact.</div>'; }
+  }
+
+  window.addEventListener("message", function (e) {
+    var d = e.data;
+    if (d && d.type === "open-notebook:artifact") onArtifact(d);
+  });
+  // Tell the host we're listening; it (re)posts the artifact in response.
+  try { parent.postMessage({ type: "open-notebook:ready" }, "*"); } catch (e) {}
+})();
+</script>
+</body>
+</html>

@@ -137,3 +137,20 @@ async def test_no_text_role_is_failure():
         result = await creator.generate(req)
         assert result.status == "FAILURE"
         assert result.errors[0].phase == "setup"
+
+
+def test_manifest_declares_view_bundle_and_it_ships():
+    """The creator owns its UI: the manifest points at a shipped HTML view bundle."""
+    from importlib import resources
+
+    m = FlashcardCreator().manifest
+    assert m.view is not None
+    assert m.view.entry == "view/index.html"
+    asset = resources.files("flashcard_creator").joinpath(m.view.entry)
+    assert asset.is_file()
+    html = asset.read_text()
+    # self-contained + speaks the host handshake + dispatches our schema
+    assert "open-notebook:ready" in html
+    assert "open-notebook:artifact" in html
+    assert "flashcards.v1" in html
+    assert "<script src" not in html  # no external scripts (sandbox-safe, offline)

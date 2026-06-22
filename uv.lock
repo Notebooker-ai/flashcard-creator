@@ -216,7 +216,7 @@ wheels = [
 
 [[package]]
 name = "flashcard-creator"
-version = "0.1.1"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "ai-prompter" },
@@ -533,8 +533,8 @@ wheels = [
 
 [[package]]
 name = "open-notebook-creator-sdk"
-version = "0.1.0"
-source = { git = "https://github.com/Notebooker-ai/open-notebook-creator-sdk.git?branch=main#bd9d4f9fc8bfc0efeb18be295a6dfc2cfb972020" }
+version = "0.4.0"
+source = { git = "https://github.com/Notebooker-ai/open-notebook-creator-sdk.git?branch=main#8cdc5bab40b534cef3468e911fe5e16577e2d9a8" }
 dependencies = [
     { name = "packaging" },
     { name = "pydantic" },
