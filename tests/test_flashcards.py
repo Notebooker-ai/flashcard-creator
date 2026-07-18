@@ -154,3 +154,22 @@ def test_manifest_declares_view_bundle_and_it_ships():
     assert "open-notebook:artifact" in html
     assert "flashcards.v1" in html
     assert "<script src" not in html  # no external scripts (sandbox-safe, offline)
+
+
+def test_view_bundle_speaks_the_review_contract():
+    """The study UI persists spaced-repetition state through the host: the view
+    must consume `review` from the artifact message and emit review-update
+    messages, using ts-fsrs-shaped card state."""
+    from importlib import resources
+
+    html = (
+        resources.files("flashcard_creator").joinpath("view/index.html").read_text()
+    )
+    # Host -> view: saved review state rides in on the artifact message.
+    assert "open-notebook:artifact" in html
+    assert "msg.review" in html
+    # View -> host: every grade is posted back for persistence.
+    assert "open-notebook:review-update" in html
+    # ts-fsrs Card shape keeps the stored state interoperable.
+    for field in ("stability", "difficulty", "scheduled_days", "last_review", "lapses"):
+        assert f'"{field}"' in html or f"{field}:" in html

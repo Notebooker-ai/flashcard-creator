@@ -7,8 +7,15 @@
 <!--
   flashcard-creator view bundle. Self-contained (no external deps) so it runs in
   the host's sandboxed, opaque-origin iframe. The host posts the artifact in via
-  postMessage; this view dispatches on schema_id and renders. Display-only — study
-  state is in-memory and resets each load (no write-back to the host API).
+  postMessage; this view dispatches on schema_id and renders.
+
+  Spaced repetition: study mode grades cards with an FSRS-5 scheduler (default
+  weights, desired retention 0.9). Per-card state is ts-fsrs-Card-shaped JSON.
+  If the host includes `review` ({card_id: state}) in the artifact message, the
+  saved state seeds the queue and every grade is posted back as
+  {type: "open-notebook:review-update", states: {card_id: state}} for the host
+  to persist. Hosts without review support still work — state is then
+  session-local.
 
   Versioning lives here: keep a renderer for every schema_id this creator has ever
   emitted. Today that is just flashcards.v1.
@@ -17,12 +24,12 @@
   :root {
     --bg: #ffffff; --fg: #18181b; --muted: #71717a; --card: #fafafa;
     --border: #e4e4e7; --accent: #4f46e5; --accent-fg: #ffffff;
-    --good: #16a34a; --bad: #dc2626;
+    --good: #16a34a; --bad: #dc2626; --warn: #d97706;
   }
   :root[data-theme="dark"] {
     --bg: #18181b; --fg: #fafafa; --muted: #a1a1aa; --card: #27272a;
     --border: #3f3f46; --accent: #6366f1; --accent-fg: #ffffff;
-    --good: #22c55e; --bad: #ef4444;
+    --good: #22c55e; --bad: #ef4444; --warn: #f59e0b;
   }
   * { box-sizing: border-box; }
   body {
@@ -31,6 +38,7 @@
   }
   .bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
   .count { color: var(--muted); font-size: 13px; }
+  .count b { color: var(--fg); }
   button {
     font: inherit; cursor: pointer; border: 1px solid var(--border);
     background: var(--card); color: var(--fg); border-radius: 8px;
@@ -44,6 +52,8 @@
   ul.list li:first-child { border-top: none; }
   .front { font-weight: 600; }
   .back { color: var(--muted); margin-top: 2px; }
+  .due-chip { float: right; font-size: 11px; border-radius: 999px; padding: 1px 8px; border: 1px solid var(--border); color: var(--muted); }
+  .due-chip.due { color: var(--warn); border-color: var(--warn); }
   .study {
     border: 1px solid var(--border); border-radius: 14px; padding: 28px 24px;
     min-height: 220px; display: flex; flex-direction: column; justify-content: center;
@@ -56,6 +66,11 @@
   .progress { color: var(--muted); font-size: 12px; }
   .done { text-align: center; color: var(--muted); padding: 40px 0; }
   .empty { color: var(--muted); padding: 24px; text-align: center; }
+  .grades { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+  .grades button { min-width: 76px; display: flex; flex-direction: column; align-items: center; gap: 1px; }
+  .grades .ivl { font-size: 11px; color: var(--muted); }
+  .grades .g1 { border-color: var(--bad); }
+  .grades .g4 { border-color: var(--good); }
 </style>
 </head>
 <body>
@@ -69,62 +84,190 @@
       .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   };
 
+  // ---- FSRS-5 scheduler ----------------------------------------------------
+  // Default FSRS-5 weights; state JSON stays ts-fsrs-Card-shaped so the host's
+  // review store and any other ts-fsrs consumer can read it.
+  var W = [0.40255, 1.18385, 3.173, 15.69105, 7.1949, 0.5345, 1.4604, 0.0046,
+           1.54575, 0.1192, 1.01925, 1.9395, 0.11, 0.29605, 2.2698, 0.2315,
+           2.9898, 0.51655, 0.6621];
+  var DECAY = -0.5, FACTOR = 19 / 81, RETENTION = 0.9;
+  var DAY_MS = 86400000, AGAIN_MINUTES = 10;
+  // ts-fsrs card states
+  var NEW = 0, LEARNING = 1, REVIEW = 2, RELEARNING = 3;
+
+  function clamp(x, lo, hi) { return Math.min(hi, Math.max(lo, x)); }
+  function initDifficulty(grade) { return clamp(W[4] - Math.exp(W[5] * (grade - 1)) + 1, 1, 10); }
+  function initStability(grade) { return Math.max(W[grade - 1], 0.1); }
+  function retrievability(elapsedDays, stability) {
+    return Math.pow(1 + FACTOR * Math.max(0, elapsedDays) / stability, DECAY);
+  }
+  function intervalDays(stability) {
+    return (stability / FACTOR) * (Math.pow(RETENTION, 1 / DECAY) - 1);
+  }
+  function nextDifficulty(d, grade) {
+    var delta = -W[6] * (grade - 3);
+    var damped = d + delta * ((10 - d) / 9);
+    return clamp(W[7] * initDifficulty(4) + (1 - W[7]) * damped, 1, 10);
+  }
+  function recallStability(d, s, r, grade) {
+    var hard = grade === 2 ? W[15] : 1;
+    var easy = grade === 4 ? W[16] : 1;
+    return s * (1 + Math.exp(W[8]) * (11 - d) * Math.pow(s, -W[9]) *
+      (Math.exp(W[10] * (1 - r)) - 1) * hard * easy);
+  }
+  function forgetStability(d, s, r) {
+    var sf = W[11] * Math.pow(d, -W[12]) * (Math.pow(s + 1, W[13]) - 1) * Math.exp(W[14] * (1 - r));
+    return Math.min(sf, s);
+  }
+
+  // Grade a card (1 Again, 2 Hard, 3 Good, 4 Easy) -> new ts-fsrs-shaped state.
+  function schedule(state, grade, now) {
+    var isNew = !state || state.state == null || state.state === NEW;
+    var s, d, lapses = (state && state.lapses) || 0, reps = (state && state.reps) || 0;
+    var elapsed = 0;
+    if (isNew) {
+      s = initStability(grade);
+      d = initDifficulty(grade);
+    } else {
+      var last = state.last_review ? Date.parse(state.last_review) : now;
+      elapsed = Math.max(0, (now - last) / DAY_MS);
+      s = state.stability || initStability(grade);
+      d = state.difficulty || initDifficulty(grade);
+      var r = retrievability(elapsed, s);
+      s = grade === 1 ? forgetStability(d, s, r) : recallStability(d, s, r, grade);
+      d = nextDifficulty(d, grade);
+    }
+    var newState, dueMs, scheduledDays;
+    if (grade === 1) {
+      newState = (state && state.state === REVIEW) ? RELEARNING : LEARNING;
+      if (state && state.state === REVIEW) lapses += 1;
+      scheduledDays = 0;
+      dueMs = now + AGAIN_MINUTES * 60000;
+    } else {
+      newState = REVIEW;
+      scheduledDays = Math.max(1, Math.round(intervalDays(s)));
+      dueMs = now + scheduledDays * DAY_MS;
+    }
+    return {
+      due: new Date(dueMs).toISOString(),
+      stability: s,
+      difficulty: d,
+      elapsed_days: elapsed,
+      scheduled_days: scheduledDays,
+      reps: reps + 1,
+      lapses: lapses,
+      state: newState,
+      last_review: new Date(now).toISOString()
+    };
+  }
+
+  // Preview label for a grade button ("10m", "3d", "2.1mo").
+  function previewInterval(state, grade, now) {
+    if (grade === 1) { return AGAIN_MINUTES + "m"; }
+    var next = schedule(state, grade, now);
+    var days = next.scheduled_days;
+    if (days < 30) { return days + "d"; }
+    return (days / 30).toFixed(1).replace(/\.0$/, "") + "mo";
+  }
+
   // ---- per-schema renderers (keep old versions forever) --------------------
   var renderers = {
     "flashcards.v1": renderFlashcardsV1,
   };
 
-  function renderFlashcardsV1(data) {
+  function renderFlashcardsV1(data, review, postReview) {
     var deck = (data && data.deck_name) || "Flashcards";
     var cards = (data && Array.isArray(data.cards)) ? data.cards : [];
     if (!cards.length) {
       root.innerHTML = '<div class="empty">This deck has no cards.</div>';
       return;
     }
+    var states = review || {};
 
-    var studying = false, idx = 0, revealed = false;
+    function cardState(c) { return states[c.id]; }
+    function isDue(c, now) {
+      var st = cardState(c);
+      return !!(st && st.due && Date.parse(st.due) <= now);
+    }
+    function isNewCard(c) { return !cardState(c); }
 
-    function shuffle() {
-      for (var i = cards.length - 1; i > 0; i--) {
-        var j = Math.floor(Math.random() * (i + 1));
-        var t = cards[i]; cards[i] = cards[j]; cards[j] = t;
-      }
+    // Due + new cards, oldest due first, then new cards in deck order.
+    function buildQueue(now, practiceAll) {
+      var due = cards.filter(function (c) { return isDue(c, now); });
+      due.sort(function (a, b) { return Date.parse(cardState(a).due) - Date.parse(cardState(b).due); });
+      var fresh = cards.filter(isNewCard);
+      var queue = due.concat(fresh);
+      if (!queue.length && practiceAll) { queue = cards.slice(); }
+      return queue;
     }
 
+    function dueLabel(c, now) {
+      var st = cardState(c);
+      if (!st || !st.due) { return '<span class="due-chip">new</span>'; }
+      var ms = Date.parse(st.due) - now;
+      if (ms <= 0) { return '<span class="due-chip due">due</span>'; }
+      var days = Math.ceil(ms / DAY_MS);
+      return '<span class="due-chip">in ' + (days < 1 ? '&lt;1d' : days + 'd') + '</span>';
+    }
+
+    var queue = [], idx = 0, revealed = false;
+
     function listView() {
+      var now = Date.now();
+      var dueCount = cards.filter(function (c) { return isDue(c, now); }).length;
+      var newCount = cards.filter(isNewCard).length;
       var items = cards.map(function (c) {
-        return '<li><div class="front">' + esc(c.front) + '</div>' +
+        return '<li>' + dueLabel(c, now) + '<div class="front">' + esc(c.front) + '</div>' +
                '<div class="back">' + esc(c.back) + '</div></li>';
       }).join("");
+      var toStudy = dueCount + newCount;
       root.innerHTML =
         '<div class="bar">' +
-          '<div class="count">' + cards.length + ' card' + (cards.length === 1 ? '' : 's') + '</div>' +
+          '<div class="count"><b>' + dueCount + '</b> due · <b>' + newCount + '</b> new · ' +
+            cards.length + ' card' + (cards.length === 1 ? '' : 's') + '</div>' +
           '<div class="row">' +
-            '<button class="primary" id="study">Study</button>' +
+            (toStudy > 0
+              ? '<button class="primary" id="study">Study ' + toStudy + '</button>'
+              : '<button class="primary" id="study">Practice all</button>') +
           '</div>' +
         '</div>' +
         '<ul class="list">' + items + '</ul>';
       document.getElementById("study").onclick = function () {
-        studying = true; idx = 0; revealed = false; shuffle(); studyView();
+        queue = buildQueue(Date.now(), true);
+        idx = 0; revealed = false; studyView();
       };
     }
 
     function studyView() {
-      if (idx >= cards.length) {
+      if (idx >= queue.length) {
         root.innerHTML =
           '<div class="bar"><div class="count">' + esc(deck) + '</div>' +
           '<div class="row"><button id="exit">Back to list</button></div></div>' +
-          '<div class="study"><div class="done">All done — ' + cards.length +
-          ' cards reviewed.</div><div class="row" style="justify-content:center">' +
+          '<div class="study"><div class="done">All done — ' + queue.length +
+          ' card' + (queue.length === 1 ? '' : 's') + ' reviewed.</div>' +
+          '<div class="row" style="justify-content:center">' +
           '<button class="primary" id="again">Study again</button></div></div>';
-        document.getElementById("exit").onclick = function () { studying = false; listView(); };
-        document.getElementById("again").onclick = function () { idx = 0; revealed = false; shuffle(); studyView(); };
+        document.getElementById("exit").onclick = listView;
+        document.getElementById("again").onclick = function () {
+          queue = buildQueue(Date.now(), true);
+          idx = 0; revealed = false; studyView();
+        };
         return;
       }
-      var c = cards[idx];
+      var c = queue[idx];
+      var now = Date.now();
       var tags = (c.tags && c.tags.length)
         ? '<div class="tags">' + c.tags.map(function (t) { return '<span class="tag">' + esc(t) + '</span>'; }).join("") + '</div>'
         : '';
+      var grades = '';
+      if (revealed) {
+        var labels = ["", "Again", "Hard", "Good", "Easy"];
+        var buttons = [1, 2, 3, 4].map(function (g) {
+          return '<button class="g' + g + '" data-grade="' + g + '">' + labels[g] +
+                 '<span class="ivl">' + previewInterval(cardState(c), g, now) + '</span></button>';
+        }).join("");
+        grades = '<div class="grades">' + buttons + '</div>';
+      }
       root.innerHTML =
         '<div class="bar">' +
           '<div class="count">' + esc(deck) + '</div>' +
@@ -134,15 +277,23 @@
           '<div class="q">' + esc(c.front) + '</div>' +
           (revealed ? ('<div class="a">' + esc(c.back) + '</div>' + tags) : '') +
           '<div class="row" style="justify-content:center">' +
-            (revealed
-              ? '<button id="next" class="primary">Next card</button>'
-              : '<button id="reveal" class="primary">Reveal answer</button>') +
+            (revealed ? grades : '<button id="reveal" class="primary">Reveal answer</button>') +
           '</div>' +
-          '<div class="progress">' + (idx + 1) + ' / ' + cards.length + '</div>' +
+          '<div class="progress">' + (idx + 1) + ' / ' + queue.length + '</div>' +
         '</div>';
-      document.getElementById("exit").onclick = function () { studying = false; listView(); };
+      document.getElementById("exit").onclick = listView;
       if (revealed) {
-        document.getElementById("next").onclick = function () { idx++; revealed = false; studyView(); };
+        Array.prototype.forEach.call(root.querySelectorAll(".grades button"), function (btn) {
+          btn.onclick = function () {
+            var grade = Number(btn.getAttribute("data-grade"));
+            var next = schedule(cardState(c), grade, Date.now());
+            states[c.id] = next;
+            postReview(c.id, next);
+            // "Again" re-queues the card at the end of this session.
+            if (grade === 1) { queue.push(c); }
+            idx++; revealed = false; studyView();
+          };
+        });
       } else {
         document.getElementById("reveal").onclick = function () { revealed = true; studyView(); };
       }
@@ -163,7 +314,14 @@
       root.innerHTML = '<div class="empty">No renderer for "' + esc(msg.schema_id) + '".</div>';
       return;
     }
-    try { r(msg.data || {}); }
+    var postReview = function (cardId, state) {
+      try {
+        var states = {};
+        states[cardId] = state;
+        parent.postMessage({ type: "open-notebook:review-update", states: states }, "*");
+      } catch (e) {}
+    };
+    try { r(msg.data || {}, msg.review || {}, postReview); }
     catch (e) { root.innerHTML = '<div class="empty">Failed to render this artifact.</div>'; }
   }
 
