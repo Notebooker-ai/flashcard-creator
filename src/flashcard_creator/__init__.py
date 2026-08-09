@@ -96,6 +96,10 @@ class FlashcardCreator(BaseCreator):
             ],
             icon="layers",
             view=CreatorView(entry="view/index.html"),
+            suggestion_hint=(
+                "what to drill: which terms, definitions, and concepts become cards, "
+                "where to focus difficulty, and what to leave out"
+            ),
         )
 
     async def generate(self, request: CreationRequest) -> CreationResult:
